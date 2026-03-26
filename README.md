@@ -13,7 +13,7 @@ New device types can be added by installing plugin packages from git.
 |---|---|
 | 🔐 Certificate issuance | Generate keys, CSRs, self-signed or CA-signed certificates |
 | 🔄 Renewal tracking | JSON store tracks every certificate's lifecycle status |
-| 🌐 ACME / Let's Encrypt | Obtain wildcard certs via DNS-01 challenge (optional) |
+| 🌐 ACME / Let's Encrypt | Obtain wildcard certs via DNS-01 or DNS-PERSIST-01 challenge |
 | 🔌 Plugin architecture | Install device plugins from git repos with one command |
 | 🖨️ HP Printer | Deploy via the HP Embedded Web Server (EWS) |
 | 🖥️ Proxmox VE | Deploy via the Proxmox REST API |
@@ -122,6 +122,9 @@ ca_key_path:  ~/.chum/certs/ca/ca.key
 # ACME / Let's Encrypt (optional)
 acme_email: admin@example.com
 acme_staging: false
+acme_challenge_type: dns-01  # or dns-persist-01
+acme_persist_policy: wildcard  # optional: wildcard or subdomain
+acme_persist_until: "2027-12-01T00:00:00Z"  # optional expiry
 
 # Expiry warning threshold
 expiry_warning_days: 30
@@ -137,7 +140,81 @@ expiry_warning_days: 30
 | `CHUM_CA_KEY_PATH` | Path to the CA private key |
 | `CHUM_ACME_EMAIL` | ACME registration email |
 | `CHUM_ACME_STAGING` | Use Let's Encrypt staging (`true`/`false`) |
+| `CHUM_ACME_CHALLENGE_TYPE` | ACME challenge type: `dns-01` or `dns-persist-01` |
+| `CHUM_ACME_PERSIST_POLICY` | DNS-PERSIST-01 policy: `wildcard` or `subdomain` |
+| `CHUM_ACME_PERSIST_UNTIL` | DNS-PERSIST-01 authorization expiry (ISO 8601) |
 | `CHUM_EXPIRY_WARNING_DAYS` | Days before expiry to warn |
+
+---
+
+## DNS-PERSIST-01: Persistent DNS Validation
+
+Chum supports the new [DNS-PERSIST-01](https://letsencrypt.org/2026/02/18/dns-persist-01.html)
+challenge type introduced by Let's Encrypt in 2026. This allows certificate issuance and
+renewal without requiring DNS record changes for each operation.
+
+### Benefits
+
+| Traditional DNS-01 | DNS-PERSIST-01 |
+|---|---|
+| Create/delete TXT record for each issuance | One-time TXT record setup |
+| DNS propagation delays | No renewal-time DNS changes |
+| DNS API credentials needed everywhere | Reduced credential exposure |
+| Per-request automation complexity | Simplified automation at scale |
+
+### How It Works
+
+1. **One-time setup**: Create a persistent TXT record at `_validation-persist.<domain>`
+2. **Ongoing use**: Certificate issuance and renewals verify the existing record
+3. **No cleanup needed**: The record persists until you manually remove it
+
+### Setup
+
+```python
+from chum.core.acme import AcmeClient
+
+# Initialize and register
+client = AcmeClient(email="admin@example.com")
+account_key_pem = client.register()
+
+# Generate the persistent DNS record (one-time)
+record = client.generate_persist_record(
+    domain="example.com",
+    policy="wildcard",  # Authorize *.example.com
+    persist_until="2027-12-01T00:00:00Z",  # Optional expiry
+)
+
+print(f"Create this DNS TXT record:")
+print(f"  {record['fqdn']} = \"{record['value']}\"")
+```
+
+### Example TXT Record
+
+```dns
+_validation-persist.example.com.  IN TXT "acme-v02.api.letsencrypt.org; accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/123456789; policy=wildcard"
+```
+
+### Obtaining Certificates
+
+Once the persistent DNS record is in place:
+
+```python
+# No DNS hooks needed!
+cert_pem, chain_pem, key_pem = client.obtain_wildcard_persist(
+    domain="example.com",
+)
+```
+
+### Security Considerations
+
+⚠️ **Important**: DNS-PERSIST-01 does not re-validate domain control at each renewal.
+If your DNS is compromised, an attacker could maintain certificate authorization until
+you remove the TXT record.
+
+- **Audit regularly**: Monitor your `_validation-persist.*` records
+- **Rotate credentials**: Update authorization records when changing ACME accounts
+- **Use expiry**: Set `persist_until` to limit authorization lifetime
+- **Remove promptly**: Delete records when domains are decommissioned
 
 ---
 

@@ -1,13 +1,23 @@
 """
 ACME client wrapper for obtaining wildcard certificates via Let's Encrypt
-(or any RFC 8555-compatible CA) using the DNS-01 challenge.
+(or any RFC 8555-compatible CA) using the DNS-01 or DNS-PERSIST-01 challenge.
 
 This module wraps the ``acme`` and ``josepy`` libraries and provides a
 thin, testable interface for the rest of Chum.  DNS challenge hooks are
 delegated to a user-supplied callable so that any DNS provider can be
 integrated.
 
-Usage example::
+**DNS-01 Challenge** (Traditional):
+    Requires creating a new TXT record ``_acme-challenge.<domain>`` for each
+    certificate issuance/renewal. The record is deleted after validation.
+
+**DNS-PERSIST-01 Challenge** (New):
+    Creates a long-lasting TXT record at ``_validation-persist.<domain>`` that
+    authorizes a specific ACME account to issue certificates indefinitely.
+    No DNS changes are needed for renewals. See:
+    https://letsencrypt.org/2026/02/18/dns-persist-01.html
+
+Usage example (DNS-01)::
 
     from chum.core.acme import AcmeClient
 
@@ -29,15 +39,46 @@ Usage example::
         dns_set_hook=set_txt,
         dns_del_hook=del_txt,
     )
+
+Usage example (DNS-PERSIST-01)::
+
+    from chum.core.acme import AcmeClient
+
+    client = AcmeClient(
+        email="admin@example.com",
+        directory_url="https://acme-v02.api.letsencrypt.org/directory",
+    )
+    account_key_pem = client.register()
+
+    # Generate and display the persistent DNS record (one-time setup)
+    record = client.generate_persist_record(
+        domain="example.com",
+        policy="wildcard",  # optional: "wildcard" or "subdomain"
+        persist_until="2027-12-01T00:00:00Z",  # optional expiry
+    )
+    print(f"Create TXT record: {record['fqdn']} = {record['value']}")
+
+    # After creating the DNS record, obtain certificates without DNS hooks
+    cert_pem, chain_pem, key_pem = client.obtain_wildcard_persist(
+        domain="example.com",
+    )
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, List, Optional, Tuple
+from enum import Enum
+from typing import Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
+
+
+class ChallengeType(Enum):
+    """ACME challenge types supported by Chum."""
+
+    DNS_01 = "dns-01"
+    DNS_PERSIST_01 = "dns-persist-01"
 
 # ---------------------------------------------------------------------------
 # Optional runtime dependency guard – acme/josepy are large packages; we
@@ -216,6 +257,231 @@ class AcmeClient:
         return leaf_pem, chain_pem, key_pem
 
     # ------------------------------------------------------------------
+    # DNS-PERSIST-01 Support
+    # ------------------------------------------------------------------
+
+    @property
+    def account_uri(self) -> Optional[str]:
+        """
+        Return the ACME account URI, if registered.
+
+        This URI is needed for the DNS-PERSIST-01 TXT record.
+        """
+        if self._acme_client is None:
+            return None
+        # The account URI is stored in the client after registration
+        try:
+            return self._acme_client.net.account.uri
+        except AttributeError:
+            return None
+
+    def generate_persist_record(
+        self,
+        domain: str,
+        policy: Optional[str] = None,
+        persist_until: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Generate the DNS TXT record value for DNS-PERSIST-01 authorization.
+
+        This is a one-time setup step. After creating this DNS record, you can
+        use :meth:`obtain_wildcard_persist` for all future certificate issuances
+        and renewals without needing to update DNS.
+
+        Parameters
+        ----------
+        domain:
+            The domain to authorize, e.g. ``"example.com"``.
+        policy:
+            Optional authorization policy. Supported values:
+
+            - ``None`` (default): Only the exact domain is authorized.
+            - ``"wildcard"``: Authorizes wildcard certificates (``*.domain``).
+            - ``"subdomain"``: Authorizes any subdomain certificates.
+        persist_until:
+            Optional ISO 8601 timestamp for when the authorization expires,
+            e.g. ``"2027-12-01T00:00:00Z"``. If not set, the authorization
+            persists indefinitely (until the DNS record is removed).
+
+        Returns
+        -------
+        dict with keys:
+            - ``fqdn``: The fully qualified domain name for the TXT record
+              (e.g., ``_validation-persist.example.com``)
+            - ``value``: The TXT record value to set
+            - ``issuer_domain``: The CA issuer domain (e.g., ``letsencrypt.org``)
+            - ``account_uri``: The ACME account URI
+            - ``policy``: The policy string, if provided
+            - ``persist_until``: The expiry timestamp, if provided
+
+        Raises
+        ------
+        AcmeError
+            If the client has not been registered yet.
+
+        Example
+        -------
+        ::
+
+            client = AcmeClient(email="admin@example.com")
+            client.register()
+            record = client.generate_persist_record(
+                "example.com",
+                policy="wildcard",
+                persist_until="2027-12-01T00:00:00Z",
+            )
+            # Create this TXT record in your DNS provider:
+            # _validation-persist.example.com TXT "letsencrypt.org; accounturi=https://..."
+        """
+        if self._acme_client is None:
+            raise AcmeError("Call register() before generate_persist_record()")
+
+        account_uri = self.account_uri
+        if not account_uri:
+            raise AcmeError("Account URI not available. Registration may have failed.")
+
+        # Determine the issuer domain from the directory URL
+        import urllib.parse
+
+        parsed = urllib.parse.urlparse(self._directory_url)
+        issuer_domain = parsed.netloc
+
+        # Build the TXT record value
+        # Format: "issuer-domain; accounturi=<account-uri>[; policy=<policy>][; persistUntil=<timestamp>]"
+        parts = [issuer_domain, f"accounturi={account_uri}"]
+
+        if policy:
+            if policy not in ("wildcard", "subdomain"):
+                raise AcmeError(f"Invalid policy: {policy}. Must be 'wildcard' or 'subdomain'.")
+            parts.append(f"policy={policy}")
+
+        if persist_until:
+            parts.append(f"persistUntil={persist_until}")
+
+        txt_value = "; ".join(parts)
+        fqdn = f"_validation-persist.{domain}"
+
+        result = {
+            "fqdn": fqdn,
+            "value": txt_value,
+            "issuer_domain": issuer_domain,
+            "account_uri": account_uri,
+        }
+        if policy:
+            result["policy"] = policy
+        if persist_until:
+            result["persist_until"] = persist_until
+
+        return result
+
+    def obtain_wildcard_persist(
+        self,
+        domain: str,
+        poll_interval: float = 5.0,
+        poll_timeout: float = 120.0,
+    ) -> Tuple[bytes, bytes, bytes]:
+        """
+        Obtain a wildcard certificate using DNS-PERSIST-01 challenge.
+
+        This method assumes you have already created a persistent DNS TXT record
+        at ``_validation-persist.<domain>`` using :meth:`generate_persist_record`.
+        No DNS hooks are required as the CA will verify the existing record.
+
+        Parameters
+        ----------
+        domain:
+            The bare domain, e.g. ``"example.com"``.
+        poll_interval:
+            Seconds between challenge status polls.
+        poll_timeout:
+            Maximum seconds to wait for challenge validation.
+
+        Returns
+        -------
+        tuple of (cert_pem, chain_pem, key_pem)
+
+        Raises
+        ------
+        AcmeError
+            If registration has not been performed, or if the DNS-PERSIST-01
+            challenge is not available or fails validation.
+
+        Notes
+        -----
+        The DNS-PERSIST-01 challenge type must be supported by the CA. As of
+        2026, Let's Encrypt supports this challenge type. If the CA does not
+        support it, this method will raise an error and you should use the
+        traditional :meth:`obtain_wildcard` with DNS-01 instead.
+        """
+        if self._acme_client is None:
+            raise AcmeError("Call register() before obtain_wildcard_persist()")
+
+        wildcard = f"*.{domain}"
+        # Generate a new certificate key and CSR
+        cert_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=4096, backend=default_backend()
+        )
+        csr_pem = crypto_util.make_csr(
+            cert_key.private_bytes(
+                encoding=__import__("cryptography").hazmat.primitives.serialization.Encoding.PEM,
+                format=__import__("cryptography").hazmat.primitives.serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=__import__("cryptography").hazmat.primitives.serialization.NoEncryption(),
+            ),
+            [wildcard, domain],
+        )
+
+        order = self._acme_client.new_order(csr_pem)
+        authzs = order.authorizations
+
+        for authz in authzs:
+            # Look for DNS-PERSIST-01 challenge
+            dns_persist = self._get_dns_persist_challenge(authz)
+            if dns_persist is None:
+                # Fall back to checking if it's already valid (pre-authorized)
+                if authz.body.status == messages.STATUS_VALID:
+                    log.info(
+                        "Authorization already valid for %s (DNS-PERSIST-01 record verified)",
+                        authz.body.identifier.value,
+                    )
+                    continue
+                raise AcmeError(
+                    f"DNS-PERSIST-01 challenge not available for {authz.body.identifier.value}. "
+                    "Ensure the CA supports DNS-PERSIST-01 or use obtain_wildcard() with DNS-01."
+                )
+
+            log.info(
+                "Answering DNS-PERSIST-01 challenge for %s",
+                authz.body.identifier.value,
+            )
+            # Answer the challenge - CA will verify the existing _validation-persist TXT record
+            self._acme_client.answer_challenge(
+                dns_persist, dns_persist.chall.response(self._account_key)
+            )
+
+        order = self._poll_order(order, poll_interval, poll_timeout)
+        finalized = self._acme_client.finalize_order(
+            order,
+            deadline=__import__("datetime").datetime.now()
+            + __import__("datetime").timedelta(seconds=poll_timeout),
+        )
+
+        cert_pem = (
+            finalized.fullchain_pem.encode()
+            if isinstance(finalized.fullchain_pem, str)
+            else finalized.fullchain_pem
+        )
+        key_pem = cert_key.private_bytes(
+            encoding=__import__("cryptography").hazmat.primitives.serialization.Encoding.PEM,
+            format=__import__("cryptography").hazmat.primitives.serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=__import__("cryptography").hazmat.primitives.serialization.NoEncryption(),
+        )
+        # Split fullchain into leaf cert + chain
+        pem_parts = self._split_pem_chain(cert_pem)
+        leaf_pem = pem_parts[0] if pem_parts else cert_pem
+        chain_pem = b"".join(pem_parts[1:]) if len(pem_parts) > 1 else b""
+        return leaf_pem, chain_pem, key_pem
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
@@ -234,6 +500,26 @@ class AcmeClient:
             if isinstance(challenge_body.chall, challenges.DNS01):
                 return challenge_body
         raise AcmeError(f"No DNS-01 challenge found for {authz.body.identifier.value}")
+
+    def _get_dns_persist_challenge(self, authz: messages.AuthorizationResource):
+        """
+        Find the DNS-PERSIST-01 challenge in an authorization, if available.
+
+        Returns the challenge body, or None if DNS-PERSIST-01 is not offered.
+        The DNS-PERSIST-01 challenge type identifier is "dns-persist-01".
+        """
+        for challenge_body in authz.body.challenges:
+            # DNS-PERSIST-01 may not have a dedicated class in the acme library yet,
+            # so we check the challenge type string.
+            chall_type = getattr(challenge_body.chall, "typ", None)
+            if chall_type == "dns-persist-01":
+                return challenge_body
+            # Also check the challenge class name as a fallback
+            if hasattr(challenge_body.chall, "__class__"):
+                class_name = challenge_body.chall.__class__.__name__
+                if "DNSPersist" in class_name or "dns_persist" in class_name.lower():
+                    return challenge_body
+        return None
 
     def _poll_order(self, order, interval: float, timeout: float):
         start = time.monotonic()

@@ -109,6 +109,47 @@ class Config:
             return env.lower() in ("1", "true", "yes")
         return bool(self._data.get("acme_staging", False))
 
+    @property
+    def acme_challenge_type(self) -> str:
+        """
+        ACME challenge type to use: 'dns-01' (default) or 'dns-persist-01'.
+
+        DNS-PERSIST-01 allows certificate issuance without per-request DNS
+        updates, using a pre-configured persistent TXT record.
+        """
+        return (
+            os.environ.get("CHUM_ACME_CHALLENGE_TYPE")
+            or self._data.get("acme_challenge_type")
+            or "dns-01"
+        )
+
+    @property
+    def acme_persist_policy(self) -> Optional[str]:
+        """
+        Policy for DNS-PERSIST-01 authorization.
+
+        - None (default): Only the exact domain is authorized.
+        - 'wildcard': Authorizes wildcard certificates (*.domain).
+        - 'subdomain': Authorizes any subdomain certificates.
+        """
+        return (
+            os.environ.get("CHUM_ACME_PERSIST_POLICY")
+            or self._data.get("acme_persist_policy")
+        )
+
+    @property
+    def acme_persist_until(self) -> Optional[str]:
+        """
+        ISO 8601 timestamp for DNS-PERSIST-01 authorization expiry.
+
+        If not set, the authorization persists indefinitely (until the
+        DNS record is manually removed).
+        """
+        return (
+            os.environ.get("CHUM_ACME_PERSIST_UNTIL")
+            or self._data.get("acme_persist_until")
+        )
+
     # ------------------------------------------------------------------
     # CA (local/self-signed mode)
     # ------------------------------------------------------------------
