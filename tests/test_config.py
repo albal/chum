@@ -229,7 +229,7 @@ def test_acme_directory_url_default():
         with patch("chum.core.config._try_load_yaml", return_value={}):
             config = Config()
             assert "letsencrypt" in config.acme_directory_url
-    assert "staging" not in config.acme_directory_url
+            assert "staging" not in config.acme_directory_url
 
 
 def test_acme_directory_url_from_env():
