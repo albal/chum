@@ -1,0 +1,13 @@
+# Core runtime dependencies
+cryptography>=41.0
+requests>=2.31
+
+# Optional: ACME / Let's Encrypt
+# acme>=2.6
+# josepy>=1.14
+
+# Optional: Kubernetes / OpenShift
+# kubernetes>=28.1
+
+# Optional: YAML config file support
+# PyYAML>=6.0
