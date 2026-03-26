@@ -126,11 +126,22 @@ class Config:
     @property
     def acme_persist_policy(self) -> Optional[str]:
         """
-        Policy for DNS-PERSIST-01 authorization.
+        Policy for DNS-PERSIST-01 authorization scope.
 
-        - None (default): Only the exact domain is authorized.
-        - 'wildcard': Authorizes wildcard certificates (*.domain).
-        - 'subdomain': Authorizes any subdomain certificates.
+        This determines what types of certificates can be issued using the
+        persistent DNS record:
+
+        - None (default): Only the exact domain specified in the TXT record
+          is authorized. Wildcard certificates (*.domain) will NOT be
+          authorized unless the policy is explicitly set to 'wildcard'.
+        - 'wildcard': Authorizes wildcard certificates (*.domain) in addition
+          to the exact domain.
+        - 'subdomain': Authorizes any subdomain certificates (e.g.,
+          sub.domain, deep.sub.domain) but not wildcards.
+
+        Note: This setting is used when generating the persistent DNS record
+        via generate_persist_record(). Changing it after record creation
+        requires updating the DNS TXT record.
         """
         return (
             os.environ.get("CHUM_ACME_PERSIST_POLICY")
