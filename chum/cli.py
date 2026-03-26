@@ -101,7 +101,7 @@ def _plugin_kwargs(args: argparse.Namespace) -> dict:
         kwargs["verify_ssl"] = args.verify_ssl
 
     # Parse extra --option key=value pairs
-    for opt in getattr(args, "option", []):
+    for opt in getattr(args, "option", None) or []:
         if "=" in opt:
             k, v = opt.split("=", 1)
             kwargs[k.strip()] = v.strip()

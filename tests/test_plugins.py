@@ -306,3 +306,264 @@ class TestIDRACPlugin:
         )
         result = self.plugin.get_current_cert(host="10.0.0.2")
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Plugin verify() method tests
+# ---------------------------------------------------------------------------
+
+
+class TestHPPrinterVerify:
+    """Tests for HPPrinterPlugin.verify() method."""
+
+    def setup_method(self):
+        self.plugin = HPPrinterPlugin()
+
+    def test_verify_missing_host(self):
+        """Test verify returns False when host is not provided."""
+        result = self.plugin.verify(FAKE_CERT_PEM)
+        assert result is False
+
+    @patch("ssl.get_server_certificate")
+    def test_verify_no_current_cert(self, mock_ssl):
+        """Test verify returns False when no cert can be retrieved."""
+        mock_ssl.side_effect = ssl.SSLError("Connection refused")
+        result = self.plugin.verify(FAKE_CERT_PEM, host="192.168.1.10")
+        assert result is False
+
+    @patch("ssl.get_server_certificate")
+    @patch("cryptography.x509.load_pem_x509_certificate")
+    def test_verify_certificates_match(self, mock_load_cert, mock_ssl):
+        """Test verify returns True when fingerprints match."""
+        mock_ssl.return_value = FAKE_CERT_PEM.decode()
+
+        mock_cert = MagicMock()
+        mock_cert.fingerprint.return_value = b"matching_fingerprint"
+        mock_load_cert.return_value = mock_cert
+
+        result = self.plugin.verify(FAKE_CERT_PEM, host="192.168.1.10")
+        assert result is True
+
+    @patch("ssl.get_server_certificate")
+    @patch("cryptography.x509.load_pem_x509_certificate")
+    def test_verify_certificates_mismatch(self, mock_load_cert, mock_ssl):
+        """Test verify returns False when fingerprints don't match."""
+        mock_ssl.return_value = FAKE_CERT_PEM.decode()
+
+        # Create different fingerprints
+        mock_expected_cert = MagicMock()
+        mock_expected_cert.fingerprint.return_value = b"expected_fingerprint"
+        mock_actual_cert = MagicMock()
+        mock_actual_cert.fingerprint.return_value = b"different_fingerprint"
+
+        mock_load_cert.side_effect = [mock_expected_cert, mock_actual_cert]
+
+        result = self.plugin.verify(FAKE_CERT_PEM, host="192.168.1.10")
+        assert result is False
+
+    @patch("ssl.get_server_certificate")
+    @patch("cryptography.x509.load_pem_x509_certificate")
+    def test_verify_handles_exception(self, mock_load_cert, mock_ssl):
+        """Test verify returns False when certificate parsing fails."""
+        mock_ssl.return_value = FAKE_CERT_PEM.decode()
+        mock_load_cert.side_effect = ValueError("Invalid certificate")
+
+        result = self.plugin.verify(FAKE_CERT_PEM, host="192.168.1.10")
+        assert result is False
+
+
+class TestProxmoxVerify:
+    """Tests for ProxmoxPlugin.verify() method."""
+
+    def setup_method(self):
+        self.plugin = ProxmoxPlugin()
+
+    def test_verify_missing_host(self):
+        """Test verify returns False when host is not provided."""
+        result = self.plugin.verify(FAKE_CERT_PEM)
+        assert result is False
+
+    @patch.object(ProxmoxPlugin, "get_current_cert")
+    @patch("cryptography.x509.load_pem_x509_certificate")
+    def test_verify_certificates_match(self, mock_load_cert, mock_get_cert):
+        """Test verify returns True when fingerprints match."""
+        mock_get_cert.return_value = FAKE_CERT_PEM
+
+        mock_cert = MagicMock()
+        mock_cert.fingerprint.return_value = b"matching_fingerprint"
+        mock_load_cert.return_value = mock_cert
+
+        result = self.plugin.verify(FAKE_CERT_PEM, host="10.0.0.1")
+        assert result is True
+
+    @patch.object(ProxmoxPlugin, "get_current_cert")
+    def test_verify_no_current_cert(self, mock_get_cert):
+        """Test verify returns False when no cert can be retrieved."""
+        mock_get_cert.return_value = None
+
+        result = self.plugin.verify(FAKE_CERT_PEM, host="10.0.0.1")
+        assert result is False
+
+
+class TestOpenShiftVerify:
+    """Tests for OpenShiftPlugin.verify() method."""
+
+    def setup_method(self):
+        self.plugin = OpenShiftPlugin()
+
+    def test_verify_no_client(self):
+        """Test verify returns False when no client can be built."""
+        with patch.object(self.plugin, "_build_client", return_value=None):
+            result = self.plugin.verify(FAKE_CERT_PEM)
+            assert result is False
+
+    def test_verify_with_mock_client_cert_exists(self):
+        """Test verify returns True when secret exists with matching cert."""
+        mock_client = MagicMock()
+        # Mock successful secret retrieval with matching cert
+        import base64
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {
+                "tls.crt": base64.b64encode(FAKE_CERT_PEM).decode()
+            }
+        }
+        mock_client.get.return_value = mock_resp
+
+        with patch.object(self.plugin, "_build_client", return_value=mock_client):
+            # Mock the certificate loading to avoid real parsing
+            with patch("cryptography.x509.load_pem_x509_certificate") as mock_load:
+                mock_cert = MagicMock()
+                mock_cert.fingerprint.return_value = b"matching_fingerprint"
+                mock_load.return_value = mock_cert
+                result = self.plugin.verify(FAKE_CERT_PEM)
+                assert result is True
+
+    def test_verify_with_mock_client_cert_not_found(self):
+        """Test verify returns False when secret doesn't exist."""
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_client.get.return_value = mock_resp
+
+        with patch.object(self.plugin, "_build_client", return_value=mock_client):
+            result = self.plugin.verify(FAKE_CERT_PEM)
+            assert result is False
+
+
+class TestIDRACVerify:
+    """Tests for IDRACPlugin.verify() method."""
+
+    def setup_method(self):
+        self.plugin = IDRACPlugin()
+
+    def test_verify_missing_host(self):
+        """Test verify returns False when host is not provided."""
+        result = self.plugin.verify(FAKE_CERT_PEM)
+        assert result is False
+
+    @patch("ssl.get_server_certificate")
+    @patch("cryptography.x509.load_pem_x509_certificate")
+    def test_verify_certificates_match(self, mock_load_cert, mock_ssl):
+        """Test verify returns True when fingerprints match."""
+        mock_ssl.return_value = FAKE_CERT_PEM.decode()
+
+        mock_cert = MagicMock()
+        mock_cert.fingerprint.return_value = b"matching_fingerprint"
+        mock_load_cert.return_value = mock_cert
+
+        result = self.plugin.verify(FAKE_CERT_PEM, host="10.0.0.2")
+        assert result is True
+
+    @patch("ssl.get_server_certificate")
+    def test_verify_no_current_cert(self, mock_ssl):
+        """Test verify returns False when no cert can be retrieved."""
+        mock_ssl.side_effect = ssl.SSLError("Connection refused")
+        result = self.plugin.verify(FAKE_CERT_PEM, host="10.0.0.2")
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Plugin get_current_cert() additional tests
+# ---------------------------------------------------------------------------
+
+
+class TestProxmoxGetCurrentCert:
+    """Tests for ProxmoxPlugin.get_current_cert() method."""
+
+    def setup_method(self):
+        self.plugin = ProxmoxPlugin()
+
+    def test_get_current_cert_missing_host(self):
+        """Test get_current_cert returns None when host is missing."""
+        result = self.plugin.get_current_cert()
+        assert result is None
+
+    @patch("chum.plugins.proxmox.requests")
+    def test_get_current_cert_success(self, mock_requests):
+        """Test get_current_cert retrieves certificate successfully."""
+        session = MagicMock()
+        mock_requests.Session.return_value = session
+
+        # Mock auth response
+        auth_resp = MagicMock()
+        auth_resp.json.return_value = {
+            "data": {"ticket": "PVE:root@pam:ABCD", "CSRFPreventionToken": "TOKEN"}
+        }
+        auth_resp.raise_for_status = MagicMock()
+        session.post.return_value = auth_resp
+
+        # Mock cert retrieval - data is a list of cert entries
+        get_resp = MagicMock()
+        get_resp.json.return_value = {
+            "data": [
+                {"filename": "pve-ssl.pem", "pem": FAKE_CERT_PEM.decode()}
+            ]
+        }
+        get_resp.raise_for_status = MagicMock()
+        session.get.return_value = get_resp
+
+        result = self.plugin.get_current_cert(host="10.0.0.1", password="secret")
+        assert result is not None
+
+    @patch("chum.plugins.proxmox.requests")
+    def test_get_current_cert_auth_failure(self, mock_requests):
+        """Test get_current_cert returns None on auth failure."""
+        session = MagicMock()
+        mock_requests.Session.return_value = session
+        session.post.side_effect = Exception("401 Unauthorized")
+
+        result = self.plugin.get_current_cert(host="10.0.0.1", password="wrong")
+        assert result is None
+
+
+class TestOpenShiftGetCurrentCert:
+    """Tests for OpenShiftPlugin.get_current_cert() method."""
+
+    def setup_method(self):
+        self.plugin = OpenShiftPlugin()
+
+    def test_get_current_cert_no_client(self):
+        """Test get_current_cert returns None when no client."""
+        with patch.object(self.plugin, "_build_client", return_value=None):
+            result = self.plugin.get_current_cert()
+            assert result is None
+
+    def test_get_current_cert_secret_exists(self):
+        """Test get_current_cert returns cert from existing secret."""
+        import base64
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {
+                "tls.crt": base64.b64encode(FAKE_CERT_PEM).decode()
+            }
+        }
+        mock_client.get.return_value = mock_resp
+
+        with patch.object(self.plugin, "_build_client", return_value=mock_client):
+            result = self.plugin.get_current_cert()
+            assert result is not None
+

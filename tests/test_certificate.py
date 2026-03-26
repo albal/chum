@@ -117,7 +117,11 @@ def test_self_sign_certificate_validity():
     cert, _ = _make_self_signed(days=10)
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    delta = cert.not_valid_after_utc - cert.not_valid_before_utc
+    # Handle both cryptography >= 42.0 and < 42.0
+    if hasattr(cert, "not_valid_after_utc"):
+        delta = cert.not_valid_after_utc - cert.not_valid_before_utc
+    else:
+        delta = cert.not_valid_after - cert.not_valid_before
     assert delta.days == 10
 
 

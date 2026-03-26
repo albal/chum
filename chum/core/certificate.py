@@ -233,6 +233,28 @@ def generate_ca(
     return cert, key
 
 
+def _get_cert_not_before(cert: x509.Certificate) -> datetime.datetime:
+    """Get certificate not_before time as UTC datetime (handles cryptography < 42.0)."""
+    # cryptography >= 42.0 has not_valid_before_utc, older versions have not_valid_before
+    if hasattr(cert, "not_valid_before_utc"):
+        return cert.not_valid_before_utc
+    dt = cert.not_valid_before
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _get_cert_not_after(cert: x509.Certificate) -> datetime.datetime:
+    """Get certificate not_after time as UTC datetime (handles cryptography < 42.0)."""
+    # cryptography >= 42.0 has not_valid_after_utc, older versions have not_valid_after
+    if hasattr(cert, "not_valid_after_utc"):
+        return cert.not_valid_after_utc
+    dt = cert.not_valid_after
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 def certificate_info_from_x509(cert: x509.Certificate, key_path: Optional[Path] = None) -> CertificateInfo:
     """Build a :class:`CertificateInfo` from a loaded x509 certificate object."""
     sans: List[str] = []
@@ -256,8 +278,8 @@ def certificate_info_from_x509(cert: x509.Certificate, key_path: Optional[Path] 
         common_name=common_name,
         sans=sans,
         serial=serial_hex,
-        not_before=cert.not_valid_before_utc,
-        not_after=cert.not_valid_after_utc,
+        not_before=_get_cert_not_before(cert),
+        not_after=_get_cert_not_after(cert),
         fingerprint_sha256=fingerprint,
         key_path=key_path,
     )
