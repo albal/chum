@@ -109,6 +109,58 @@ class Config:
             return env.lower() in ("1", "true", "yes")
         return bool(self._data.get("acme_staging", False))
 
+    @property
+    def acme_challenge_type(self) -> str:
+        """
+        ACME challenge type to use: 'dns-01' (default) or 'dns-persist-01'.
+
+        DNS-PERSIST-01 allows certificate issuance without per-request DNS
+        updates, using a pre-configured persistent TXT record.
+        """
+        return (
+            os.environ.get("CHUM_ACME_CHALLENGE_TYPE")
+            or self._data.get("acme_challenge_type")
+            or "dns-01"
+        )
+
+    @property
+    def acme_persist_policy(self) -> Optional[str]:
+        """
+        Policy for DNS-PERSIST-01 authorization scope.
+
+        This determines what types of certificates can be issued using the
+        persistent DNS record:
+
+        - None (default): Only the exact domain specified in the TXT record
+          is authorized. Wildcard certificates (*.domain) will NOT be
+          authorized unless the policy is explicitly set to 'wildcard'.
+        - 'wildcard': Authorizes wildcard certificates (*.domain) in addition
+          to the exact domain.
+        - 'subdomain': Authorizes any subdomain certificates (e.g.,
+          sub.domain, deep.sub.domain) but not wildcards.
+
+        Note: This setting is used when generating the persistent DNS record
+        via generate_persist_record(). Changing it after record creation
+        requires updating the DNS TXT record.
+        """
+        return (
+            os.environ.get("CHUM_ACME_PERSIST_POLICY")
+            or self._data.get("acme_persist_policy")
+        )
+
+    @property
+    def acme_persist_until(self) -> Optional[str]:
+        """
+        ISO 8601 timestamp for DNS-PERSIST-01 authorization expiry.
+
+        If not set, the authorization persists indefinitely (until the
+        DNS record is manually removed).
+        """
+        return (
+            os.environ.get("CHUM_ACME_PERSIST_UNTIL")
+            or self._data.get("acme_persist_until")
+        )
+
     # ------------------------------------------------------------------
     # CA (local/self-signed mode)
     # ------------------------------------------------------------------
